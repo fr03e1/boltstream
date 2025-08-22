@@ -1,0 +1,37 @@
+# Go
+/bin/
+/build/
+/dist/
+/coverage.out
+*.test
+
+# Modules & deps
+vendor/
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+/tmp/
+/cache/
+
+# Env & secrets
+.env
+.env.*
+*.local
+
+# Node
+web/node_modules/
+web/dist/
+
+# Docker
+docker-data/
