@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fr03e1/boltstream/internal/platform/kafkax"
+	"github.com/fr03e1/boltstream/internal/platform/metrics"
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 	"golang.org/x/time/rate"
@@ -151,12 +152,19 @@ func (m *Manager) writer(ctx context.Context) {
 			return
 		}
 
+		start := time.Now()
+
 		if err := m.w.W().WriteMessages(ctx, batch...); err != nil {
 			log.Printf("kafka write failed (batch=%d): %v", len(batch), err)
+			metrics.ProduceErrorInc(m.w.Topic())
 		} else {
 			n := int64(len(batch))
 			m.producedTotal.Add(n)
 			secCount += n
+
+			metrics.ProducedAdd(m.w.Topic(), int(n))
+			metrics.ObserveBatchSize(m.w.Topic(), int(n))
+			metrics.ObserveFlushLatency(m.w.Topic(), time.Since(start))
 		}
 
 		batch = batch[:0]

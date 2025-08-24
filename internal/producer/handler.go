@@ -26,6 +26,8 @@ func NewRouter(st *State, g *readiness.Gate, ping kafkax.Pinger, mrg *Manager) h
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer)
 
+	r.Use(metrics.HTTPMiddleware)
+
 	r.Get("/healthz", h.healthz)
 	r.Get("/readyz", h.readyz)
 	r.Method(http.MethodGet, "/metrics", metrics.Handler())

@@ -75,3 +75,4 @@ func (w *Writer) Ping(ctx context.Context) error {
 }
 
 func (w *Writer) W() *kafka.Writer { return w.w }
+func (w *Writer) Topic() string    { return w.topic }

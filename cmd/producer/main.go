@@ -6,6 +6,7 @@ import (
 	"github.com/fr03e1/boltstream/internal/platform/config"
 	"github.com/fr03e1/boltstream/internal/platform/httpx"
 	"github.com/fr03e1/boltstream/internal/platform/kafkax"
+	"github.com/fr03e1/boltstream/internal/platform/metrics"
 	"github.com/fr03e1/boltstream/internal/platform/readiness"
 	"github.com/fr03e1/boltstream/internal/producer"
 	"log"
@@ -26,6 +27,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("kafka: %v", err)
 	}
+
+	metrics.RegisterHTTP()
+	metrics.RegisterProducer()
 
 	st := producer.NewState()
 	g := readiness.New(true)
