@@ -19,21 +19,10 @@ type State struct {
 	startedAt time.Time
 }
 
-func NewState() *State {
-	return &State{startedAt: time.Now()}
-}
+func NewState() *State { return &State{startedAt: time.Now()} }
 
 func (s *State) Snapshot() Status {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	uptime := time.Since(s.startedAt).Seconds()
-
-	return Status{
-		Running:       false,
-		RunID:         "",
-		RPSTarget:     0,
-		RPSActual:     0,
-		ProducedTotal: 0,
-		UptimeSec:     int64(uptime),
-	}
+	return Status{UptimeSec: int64(time.Since(s.startedAt).Seconds())}
 }
