@@ -30,6 +30,7 @@ func main() {
 
 	metrics.RegisterHTTP()
 	metrics.RegisterProducer()
+	metrics.RegisterIngest()
 
 	st := producer.NewState()
 	g := readiness.New(true)

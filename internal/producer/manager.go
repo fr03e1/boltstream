@@ -16,6 +16,7 @@ import (
 )
 
 var ErrAlreadyRunning = errors.New("producer: already running")
+var ErrBackpressure = errors.New("backpressure: queue is full")
 
 type Manager struct {
 	w *kafkax.Writer
@@ -212,6 +213,19 @@ func (m *Manager) writer(ctx context.Context) {
 			secCount = 0
 		}
 	}
+}
+
+func (m *Manager) Enqueue(msg kafka.Message) error {
+	select {
+	case m.msg <- msg:
+		metrics.IngestAcceptedTotal.Inc()
+	default:
+		metrics.IngestRejectedTotal.Inc()
+		return ErrBackpressure
+	}
+
+	metrics.IngestQueueDepth.Set(float64(len(m.msg)))
+	return nil
 }
 
 func (m *Manager) StartedAt() time.Time {

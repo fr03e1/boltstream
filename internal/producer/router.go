@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/fr03e1/boltstream/internal/platform/metrics"
+	"github.com/google/uuid"
+	"github.com/segmentio/kafka-go"
 	"net/http"
 	"time"
 )
@@ -11,6 +14,13 @@ import (
 type KafkaHealthResp struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+type emitRequest struct {
+	EventID string          `json:"event_id,omitempty"`
+	UserID  string          `json:"user_id,omitempty"`
+	TS      string          `json:"ts,omitempty"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -106,6 +116,60 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request) {
 		Stopped:       true,
 		RunID:         runID,
 		ProducedTotal: h.mng.ProducedTotal(),
+	})
+}
+
+func (h *Handler) emit(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var req emitRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(&req); err != nil {
+		metrics.IngestRejectedTotal.Inc()
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	if req.EventID == "" {
+		req.EventID = uuid.NewString()
+	}
+	if req.UserID == "" {
+		req.UserID = "u-anon"
+	}
+	if req.TS == "" {
+		req.TS = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if len(req.Payload) == 0 || string(req.Payload) == "null" {
+		req.Payload = json.RawMessage(`{}`)
+	}
+
+	val, _ := json.Marshal(struct {
+		EventID string          `json:"event_id"`
+		UserID  string          `json:"user_id"`
+		TS      string          `json:"ts"`
+		Payload json.RawMessage `json:"payload"`
+	}{req.EventID, req.UserID, req.TS, req.Payload})
+
+	msg := kafka.Message{
+		Key:   []byte(req.UserID),
+		Value: val,
+		Time:  time.Now(),
+	}
+
+	if err := h.mng.Enqueue(msg); err != nil {
+		if errors.Is(err, ErrBackpressure) {
+			writeErr(w, http.StatusTooManyRequests, "queue is full, try later")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "enqueue failed")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"event_id": req.EventID,
+		"queued":   true,
 	})
 }
 

@@ -39,6 +39,8 @@ func NewRouter(st *State, g *readiness.Gate, ping kafkax.Pinger, mrg *Manager) h
 		})
 		r.Post("/start", h.start)
 		r.Post("/stop", h.stop)
+
+		r.Post("/emit", h.emit)
 	})
 
 	return r
