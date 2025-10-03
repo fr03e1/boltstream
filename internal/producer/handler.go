@@ -104,7 +104,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runID, err := h.mng.Start(req.RPS, true)
+	runID, err := h.mng.Start(req.RPS)
 	if err != nil {
 		if errors.Is(err, ErrAlreadyRunning) {
 			writeErr(w, http.StatusConflict, "already running")

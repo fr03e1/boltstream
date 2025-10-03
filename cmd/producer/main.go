@@ -49,6 +49,8 @@ func main() {
 		}
 	}()
 
+	mng.StartWriter(ctx)
+
 	<-ctx.Done()
 	log.Printf("shutdown: signal received, draining...")
 

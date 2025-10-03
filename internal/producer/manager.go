@@ -27,10 +27,12 @@ type Manager struct {
 	producedTotal atomic.Int64
 	rpsActual     atomic.Int64
 	startedAt     atomic.Value //time.Time
+	writerStarted atomic.Bool
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	writerWG sync.WaitGroup
+	genWG    sync.WaitGroup
 
 	msg chan kafka.Message
 }
@@ -43,6 +45,22 @@ func NewManager(w *kafkax.Writer, bufCap int) *Manager {
 		w:   w,
 		msg: make(chan kafka.Message, bufCap),
 	}
+}
+
+func (m *Manager) StartWriter(ctx context.Context) {
+	if m.writerStarted.Swap(true) {
+		return
+	}
+
+	m.writerWG.Add(1)
+
+	go func() {
+		defer m.writerWG.Done()
+		defer m.writerStarted.Store(false)
+		log.Println("writer.loop.start")
+		m.writer(ctx)
+		log.Println("writer.loop.stop")
+	}()
 }
 
 func (m *Manager) Start(rps int) (string, error) {
@@ -67,9 +85,8 @@ func (m *Manager) Start(rps int) (string, error) {
 	m.cancel = cancel
 	m.running.Store(true)
 
-	m.wg.Add(2)
+	m.genWG.Add(1)
 	go m.generator(runCtx, rps)
-	go m.writer(runCtx)
 
 	return runID, nil
 }
@@ -90,7 +107,7 @@ func (m *Manager) Stop(wait context.Context) error {
 	}
 
 	done := make(chan struct{})
-	go func() { defer close(done); m.wg.Wait() }()
+	go func() { defer close(done); m.genWG.Wait() }()
 
 	select {
 	case <-done:
@@ -101,14 +118,13 @@ func (m *Manager) Stop(wait context.Context) error {
 }
 
 func (m *Manager) generator(ctx context.Context, rps int) {
-	defer m.wg.Done()
+	defer m.genWG.Done()
 
 	lim := rate.NewLimiter(rate.Limit(rps), rps)
 	var i int64
 
 	for {
 		if err := lim.Wait(ctx); err != nil {
-			close(m.msg)
 			return
 		}
 
@@ -126,7 +142,6 @@ func (m *Manager) generator(ctx context.Context, rps int) {
 
 		select {
 		case <-ctx.Done():
-			close(m.msg)
 			return
 		case m.msg <- msg:
 		}
@@ -134,14 +149,13 @@ func (m *Manager) generator(ctx context.Context, rps int) {
 }
 
 func (m *Manager) writer(ctx context.Context) {
-	defer m.wg.Done()
-
 	const flushEvery = 50 * time.Millisecond
 	const maxBatch = 1000
 
 	t := time.NewTimer(flushEvery)
 	defer t.Stop()
 
+	lastFlush := time.Now()
 	tick1s := time.NewTicker(time.Second)
 	defer tick1s.Stop()
 	var secCount int64
@@ -171,6 +185,7 @@ func (m *Manager) writer(ctx context.Context) {
 		batch = batch[:0]
 		_ = t.Stop()
 		t.Reset(flushEvery)
+		lastFlush = time.Now()
 	}
 
 	drain := func() {
@@ -206,11 +221,18 @@ func (m *Manager) writer(ctx context.Context) {
 			if len(batch) >= maxBatch {
 				flush()
 			}
+			if time.Since(lastFlush) >= flushEvery {
+				flush()
+			}
 		case <-t.C:
 			flush()
 		case <-tick1s.C:
 			m.rpsActual.Store(secCount)
 			secCount = 0
+
+			if time.Since(lastFlush) >= flushEvery {
+				flush()
+			}
 		}
 	}
 }
