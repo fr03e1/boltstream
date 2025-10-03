@@ -36,3 +36,16 @@ services:
     depends_on:
       - prometheus
     restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    container_name: bolt_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bolt
+      POSTGRES_PASSWORD: bolt
+      POSTGRES_DB: boltstream
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../docker-data/pg_data:/var/lib/postgresql/data

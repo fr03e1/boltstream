@@ -2,6 +2,7 @@ package config
 
 import (
 	"github.com/caarlos0/env/v10"
+	"github.com/joho/godotenv"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Config struct {
 }
 
 func FromEnv() (Config, error) {
+	_ = godotenv.Load()
 	var c Config
 	if err := env.Parse(&c); err != nil {
 		return Config{}, err
