@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/joho/godotenv"
 	"github.com/segmentio/kafka-go"
 	"log"
@@ -9,6 +11,21 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+)
+
+type MsgStruct struct {
+	EventID string          `json:"event_id"`
+	UserID  string          `json:"user_id"`
+	TS      string          `json:"ts"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+var (
+	ErrInvalidJSON  = fmt.Errorf("invalid_json")
+	ErrMissingEvent = fmt.Errorf("missing_event_id")
+	ErrMissingUser  = fmt.Errorf("missing_user_id")
+	ErrBadTS        = fmt.Errorf("bad_timestamp")
+	ErrBadPayload   = fmt.Errorf("bad_payload")
 )
 
 func getenv(key, def string) string {
@@ -59,6 +76,11 @@ func main() {
 			continue
 		}
 
+		if err := ValidateAndProcess(msg.Value); err != nil {
+			log.Printf("process.error: %v len=%d head=%q", err, len(msg.Value), head(msg.Value, 96))
+			continue
+		}
+
 		log.Printf("msg topic=%s partition=%d offset=%d key=%dB value=%dB",
 			msg.Topic, msg.Partition, msg.Offset, len(msg.Key), len(msg.Value))
 
@@ -68,4 +90,31 @@ func main() {
 	}
 
 	log.Println("shutdown.done")
+}
+
+func head(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
+}
+
+func ValidateAndProcess(value []byte) error {
+	var m MsgStruct
+
+	if err := json.Unmarshal(value, &m); err != nil {
+		return ErrInvalidJSON
+	}
+
+	if _, err := time.Parse(time.RFC3339Nano, m.TS); err != nil {
+		if _, err2 := time.Parse(time.RFC3339, m.TS); err2 != nil {
+			return ErrBadTS
+		}
+	}
+
+	if len(m.Payload) == 0 || string(m.Payload) == "null" || m.Payload[0] != '{' {
+		return ErrBadPayload
+	}
+
+	return nil
 }
