@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/fr03e1/boltstream/internal/platform/metrics"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -42,6 +45,9 @@ func main() {
 	defer stop()
 
 	_ = godotenv.Load()
+	metrics.RegisterConsumer()
+	metrics.ConsumerUp.Set(1)
+	defer metrics.ConsumerUp.Set(0)
 
 	topic := getenv("TOPIC", "events")
 	groupID := os.Getenv("GROUP_ID")
@@ -50,19 +56,19 @@ func main() {
 	}
 	attempts, _ := strconv.Atoi(getenv("RETRY_ATTEMPTS", "3"))
 	baseMs, _ := strconv.Atoi(getenv("RETRY_BACKOFF_MS", "200"))
-	mode := getenv("RETRY_BACKOFF_MODE", "exponential") // а не "200"
-	if attempts < 1 {
-		attempts = 1
-	}
-	if baseMs < 1 {
-		baseMs = 1
-	}
-
+	mode := getenv("RETRY_BACKOFF_MODE", "exponential")
 	brokers := splitBrokers(os.Getenv("KAFKA_BROKERS"))
-
 	if len(brokers) == 0 {
 		log.Fatal("KAFKA_BROKERS must be set")
 	}
+
+	go func() {
+		addr := getenv("CONSUMER_METRICS_ADDR", ":8082")
+		log.Printf("metrics listening on %s", addr)
+		if err := http.ListenAndServe(addr, promhttp.Handler()); err != nil {
+			log.Fatalf("metrics server failed: %v", err)
+		}
+	}()
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        brokers,
@@ -70,12 +76,11 @@ func main() {
 		GroupID:        groupID,
 		MinBytes:       1 << 10,
 		MaxBytes:       10 << 20,
-		StartOffset:    kafka.FirstOffset,
 		CommitInterval: 0,
 		Logger:         log.New(os.Stdout, "reader ", 0),
 		ErrorLogger:    log.New(os.Stderr, "reader.err ", 0),
-		MaxWait:        200 * time.Millisecond,
 	})
+	defer reader.Close()
 
 	dlqWriter := &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
@@ -85,104 +90,145 @@ func main() {
 		Async:        false,
 		BatchBytes:   1 << 20,
 		BatchTimeout: 50 * time.Millisecond,
-		WriteTimeout: 5 * time.Second,
-		ReadTimeout:  5 * time.Second,
 	}
 	defer dlqWriter.Close()
 
-	defer func() {
-		_ = reader.Close()
-		log.Println("reader.closed")
-	}()
+	go updateLag(ctx, reader, topic)
 
 	log.Printf("consumer.start topic=%s group=%s", topic, groupID)
 
 	for {
-		msg, err := reader.FetchMessage(ctx)
+		start := time.Now()
 
+		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				log.Println("shutdown.start")
 				break
 			}
-
-			log.Printf("fetch.error: %v", err)
+			metrics.ConsumerErrorAdd("fetch", topic, 1)
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 
-		for attempt := 1; attempt <= attempts; attempt++ {
-			if err := ValidateAndProcess(msg.Value); err == nil {
-				if err := reader.CommitMessages(ctx, msg); err != nil {
-					log.Printf("commit.error: %v", err)
-				} else {
-					log.Printf("commit.ok topic=%s partition=%d offset=%d", msg.Topic, msg.Partition, msg.Offset)
-				}
-				break
-			}
-
-			log.Printf("process.error attempt=%d/%d err=%v len=%d head=%q",
-				attempt, attempts, err, len(msg.Value), head(msg.Value, 96))
-
-			if attempt == attempts {
-				log.Printf("retry.exhausted topic=%s partition=%d offset=%d", msg.Topic, msg.Partition, msg.Offset)
-
-				dlqHeaders := []kafka.Header{
-					{Key: "original-topic", Value: []byte(msg.Topic)},
-					{Key: "original-partition", Value: []byte(strconv.Itoa(msg.Partition))},
-					{Key: "original-offset", Value: []byte(strconv.FormatInt(msg.Offset, 10))},
-					{Key: "retries", Value: []byte(strconv.Itoa(attempt))},
-					{Key: "error", Value: []byte(truncate(err.Error(), 200))},
-					{Key: "ts_deadlettered", Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
-				}
-
-				dlqMsg := kafka.Message{
-					Key:     append([]byte(nil), msg.Key...),
-					Value:   append([]byte(nil), msg.Value...),
-					Time:    time.Now(),
-					Headers: dlqHeaders,
-				}
-
-				wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				errDLQ := dlqWriter.WriteMessages(wctx, dlqMsg)
-				cancel()
-
-				if errDLQ != nil {
-					log.Printf("dlq.send.error: %v", errDLQ)
-
-				} else {
-					log.Printf("dlq.send.ok topic=%s retries=%d", dlqWriter.Topic, attempt)
-					if err := reader.CommitMessages(ctx, msg); err != nil {
-						log.Printf("commit.error: %v", err)
-					} else {
-						log.Printf("commit.ok topic=%s partition=%d offset=%d", msg.Topic, msg.Partition, msg.Offset)
-					}
-				}
-
-				break
-			}
-
-			var delay time.Duration
-
-			if mode == "linear" {
-				delay = time.Duration(baseMs*attempt) * time.Millisecond
-			} else {
-				delay = time.Duration(baseMs<<uint(attempt-1)) * time.Millisecond
-				if delay > 2*time.Second {
-					delay = 2 * time.Second
-				}
-			}
-
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				log.Println("shutdown.start")
-				return
-			}
+		if err := processMessage(ctx, msg, reader, dlqWriter, attempts, baseMs, mode, start); err != nil {
+			log.Printf("message.error: %v", err)
 		}
 	}
 
 	log.Println("shutdown.done")
+}
+
+func processMessage(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer,
+	attempts, baseMs int, mode string, start time.Time) error {
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ValidateAndProcess(msg.Value); err == nil {
+			if err := reader.CommitMessages(ctx, msg); err != nil {
+				metrics.ConsumerErrorAdd("commit", msg.Topic, 1)
+			} else {
+				metrics.ConsumerCommitAdd(msg.Topic, 1)
+				metrics.ConsumerAdd(msg.Topic, 1)
+				metrics.ObserveProcessing(msg.Topic, time.Since(start).Seconds())
+				metrics.ObserveBatchBytes(msg.Topic, len(msg.Value))
+			}
+			return nil
+		}
+
+		if attempt == attempts {
+			return sendToDLQ(ctx, msg, reader, dlq, attempt, start)
+		}
+
+		var delay time.Duration
+		if mode == "linear" {
+			delay = time.Duration(baseMs*attempt) * time.Millisecond
+		} else {
+			delay = time.Duration(baseMs<<uint(attempt-1)) * time.Millisecond
+			if delay > 2*time.Second {
+				delay = 2 * time.Second
+			}
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func sendToDLQ(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer, attempt int, start time.Time) error {
+	headers := []kafka.Header{
+		{Key: "original-topic", Value: []byte(msg.Topic)},
+		{Key: "partition", Value: []byte(strconv.Itoa(msg.Partition))},
+		{Key: "offset", Value: []byte(strconv.FormatInt(msg.Offset, 10))},
+		{Key: "retries", Value: []byte(strconv.Itoa(attempt))},
+		{Key: "ts_deadlettered", Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
+	}
+
+	dlqMsg := kafka.Message{
+		Key:     msg.Key,
+		Value:   msg.Value,
+		Time:    time.Now(),
+		Headers: headers,
+	}
+
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	err := dlq.WriteMessages(wctx, dlqMsg)
+	cancel()
+
+	if err != nil {
+		metrics.ConsumerErrorAdd("dlq", msg.Topic, 1)
+		return err
+	}
+
+	if err := reader.CommitMessages(ctx, msg); err != nil {
+		metrics.ConsumerErrorAdd("commit", msg.Topic, 1)
+		return err
+	}
+
+	metrics.ConsumerCommitAdd(msg.Topic, 1)
+	metrics.ConsumerAdd(msg.Topic, 1)
+	metrics.ObserveProcessing(msg.Topic, time.Since(start).Seconds())
+	metrics.ObserveBatchBytes(msg.Topic, len(msg.Value))
+	return nil
+}
+
+func ValidateAndProcess(value []byte) error {
+	var m MsgStruct
+
+	if err := json.Unmarshal(value, &m); err != nil {
+		return ErrInvalidJSON
+	}
+	if _, err := time.Parse(time.RFC3339Nano, m.TS); err != nil {
+		if _, err2 := time.Parse(time.RFC3339, m.TS); err2 != nil {
+			return ErrBadTS
+		}
+	}
+	if len(m.Payload) == 0 || string(m.Payload) == "null" || m.Payload[0] != '{' {
+		return ErrBadPayload
+	}
+	if m.EventID == "" {
+		return ErrMissingEvent
+	}
+	if m.UserID == "" {
+		return ErrMissingUser
+	}
+	return nil
+}
+
+func updateLag(ctx context.Context, r *kafka.Reader, topic string) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			stats := r.Stats()
+			metrics.ConsumerLagSet(topic, "-1", float64(stats.Lag))
+		}
+	}
 }
 
 func splitBrokers(s string) []string {
@@ -195,46 +241,4 @@ func splitBrokers(s string) []string {
 		}
 	}
 	return out
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
-func head(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "..."
-}
-
-func ValidateAndProcess(value []byte) error {
-	var m MsgStruct
-
-	if err := json.Unmarshal(value, &m); err != nil {
-		return ErrInvalidJSON
-	}
-
-	if _, err := time.Parse(time.RFC3339Nano, m.TS); err != nil {
-		if _, err2 := time.Parse(time.RFC3339, m.TS); err2 != nil {
-			return ErrBadTS
-		}
-	}
-
-	if len(m.Payload) == 0 || string(m.Payload) == "null" || m.Payload[0] != '{' {
-		return ErrBadPayload
-	}
-
-	if m.EventID == "" {
-		return ErrMissingEvent
-	}
-
-	if m.UserID == "" {
-		return ErrMissingUser
-	}
-
-	return nil
 }

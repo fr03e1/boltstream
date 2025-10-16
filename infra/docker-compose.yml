@@ -11,7 +11,7 @@ services:
       - --node-id=0
       - --check=false
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+      - --advertise-kafka-addr=PLAINTEXT://host.docker.internal:9092
     ports: [ "9092:9092", "9644:9644" ]
     volumes:
       - ../docker-data/redpanda:/var/lib/redpanda/data
@@ -21,8 +21,22 @@ services:
     container_name: bolt_prometheus
     volumes:
       - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/rules:/etc/prometheus/rules:ro
+      - ../docker-data/prometheus:/prometheus
     ports:
       - "9090:9090"
+    restart: unless-stopped
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    volumes:
+      - ./ops/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./ops/alertmanager/slack_webhook_url:/etc/alertmanager/slack_webhook_url:ro
+    ports:
+      - "9093:9093"
     restart: unless-stopped
 
   grafana:
@@ -31,6 +45,8 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ../docker-data/grafana:/var/lib/grafana
     ports:
       - "3000:3000"
     depends_on:

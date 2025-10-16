@@ -27,6 +27,7 @@ Thumbs.db
 # Env & secrets
 .env
 *.local
+infra/ops/alertmanager/slack_webhook_url
 
 # Node
 web/node_modules/

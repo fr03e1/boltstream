@@ -1,0 +1,84 @@
+groups:
+  - name: boltstream-consumer
+    interval: 15s
+
+    rules:
+      - alert: ConsumerDown
+        expr: consumer_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Consumer down"
+          description: "consumer_up == 0 на инстансе {{ $labels.instance }} (job={{ $labels.job }}) ≥ 1m"
+
+      - alert: ConsumerMetricsAbsent
+        expr: absent(consumer_up)
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Consumer metrics absent"
+          description: "Метрики consumer не скрейпятся (absent(consumer_up)) ≥ 2m (job={{ $labels.job }})"
+
+      - alert: HighConsumerLag
+        expr: sum by (topic) (consumer_lag{partition="-1"}) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High lag (topic={{ $labels.topic }})"
+          description: "Lag > 10k сообщений по топику {{ $labels.topic }} в течение 5 минут"
+
+      - alert: ConsumerErrorsSpike
+        expr: sum by (stage, topic) (rate(consumer_errors_total[5m])) > 10
+        for: 3m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Errors spike (stage={{ $labels.stage }}, topic={{ $labels.topic }})"
+          description: "rate(consumer_errors_total[5m]) > 10/s (stage={{ $labels.stage }}, topic={{ $labels.topic }})"
+
+      - alert: NoCommitsRecently
+        expr: sum by (topic) (rate(consumer_commit_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "No commits recently (topic={{ $labels.topic }})"
+          description: "Нет коммитов ≥10 минут по топику {{ $labels.topic }}"
+
+      - alert: NoReadsRecently
+        expr: sum by (topic) (rate(consumer_read_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "No reads recently (topic={{ $labels.topic }})"
+          description: "Нет успешных чтений ≥10 минут по топику {{ $labels.topic }}"
+
+      - alert: HighProcessingLatencyP99
+        expr: histogram_quantile(0.99, sum by (le, topic) (rate(consumer_processing_seconds_bucket[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High P99 processing latency (topic={{ $labels.topic }})"
+          description: "P99 обработки > 50ms за 5 минут (topic={{ $labels.topic }})"
+
+      - alert: DLQSpike
+        expr: sum by (topic) (rate(consumer_errors_total{stage="dlq"}[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "DLQ spike (topic={{ $labels.topic }})"
+          description: "Сообщений в DLQ > 1/s в течение 2 минут (topic={{ $labels.topic }})"
