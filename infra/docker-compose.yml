@@ -10,9 +10,13 @@ services:
       - --reserve-memory=0M
       - --node-id=0
       - --check=false
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://host.docker.internal:9092
-    ports: [ "9092:9092", "9644:9644" ]
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,OUTSIDE://127.0.0.1:19092
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+      - "9644:9644"
+    networks: [ redpanda-net ]
     volumes:
       - ../docker-data/redpanda:/var/lib/redpanda/data
 
@@ -65,3 +69,8 @@ services:
       - "5432:5432"
     volumes:
       - ../docker-data/pg_data:/var/lib/postgresql/data
+    networks: [ redpanda-net ]
+
+networks:
+  redpanda-net:
+    driver: bridge
