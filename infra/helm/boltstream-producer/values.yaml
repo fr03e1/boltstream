@@ -1,0 +1,35 @@
+image:
+  repository: boltstream-producer
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+env:
+  KAFKA_BROKERS: "redpanda.platform.svc.cluster.local:9092" # если редпанда в ns platform
+  TOPIC: "events"
+  PRODUCER_BUFFER_CAP: "3000"        # строка!
+  PROMETHEUS_URL: "http://prometheus:9090"  # опц.
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+service:
+  type: ClusterIP
+  port: 8080
+  name: http
+
+probes:
+  enabled: true
+  path: /readyz
+
+ingress:
+  enabled: true
+  className: "nginx"
+  host: "producer.local"
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""

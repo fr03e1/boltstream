@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "boltstream-producer.fullname" . }}
+  labels:
+    app: {{ include "boltstream-producer.name" . }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: {{ include "boltstream-producer.name" . }}
+  ports:
+    - name: {{ .Values.service.name }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}

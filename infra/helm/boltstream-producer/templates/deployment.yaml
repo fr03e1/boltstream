@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "boltstream-producer.fullname" . }}
+  labels:
+    app: {{ include "boltstream-producer.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "boltstream-producer.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "boltstream-producer.name" . }}
+    spec:
+      containers:
+        - name: producer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pg-conn
+                  key: PG_URL
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.env.KAFKA_BROKERS }}"
+            - name: TOPIC
+              value: "{{ .Values.env.TOPIC }}"
+            - name: PRODUCER_BUFFER_CAP
+              value: "{{ .Values.env.PRODUCER_BUFFER_CAP }}"
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.env.PROMETHEUS_URL }}"
+          ports:
+            - name: {{ .Values.service.name }}
+              containerPort: {{ .Values.service.port }}
+          {{- if .Values.probes.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- end }}
+          resources:
+  {{- toYaml .Values.resources | nindent 12 }}

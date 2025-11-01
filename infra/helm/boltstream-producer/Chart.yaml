@@ -1,0 +1,6 @@
+apiVersion: v2
+name: boltstream-producer
+description: Boltstream Producer (Go) chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

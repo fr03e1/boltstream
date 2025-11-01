@@ -1,0 +1,6 @@
+apiVersion: v2
+name: clickhouse
+description: Lightweight ClickHouse single-node chart
+type: application
+version: 0.1.0
+appVersion: "24.8"
