@@ -47,6 +47,10 @@ func NewWriter(cfg *config.Config) (*Writer, error) {
 	}, nil
 }
 
+func (w *Writer) WriteMessages(ctx context.Context, msgs ...kafka.Message) error {
+	return w.w.WriteMessages(ctx, msgs...)
+}
+
 func (w *Writer) Close() error {
 	if w == nil || w.w == nil {
 		return nil

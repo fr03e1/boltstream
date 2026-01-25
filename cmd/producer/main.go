@@ -11,8 +11,8 @@ import (
 	"github.com/fr03e1/boltstream/internal/producer"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -49,37 +49,25 @@ func main() {
 		}
 	}()
 
-	mng.StartWriter(ctx)
+	mng.StartWriter()
 
 	<-ctx.Done()
 	log.Printf("shutdown: signal received, draining...")
 
-	g.Set(false)
-	srv.SetKeepAlivesEnabled(false)
-
 	graceCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = mng.Stop(graceCtx)
-		_ = kWriter.Close()
-	}()
-
+	g.Set(false)
 	if err := srv.Shutdown(graceCtx); err != nil {
 		log.Printf("shutdown graceful failed: %v, forcing close", err)
 		_ = srv.Close()
 	}
-
-	done := make(chan struct{})
-	go func() { defer close(done); wg.Wait() }()
-
-	select {
-	case <-done:
-		log.Println("shutdown: app drained")
-	case <-graceCtx.Done():
-		log.Println("shutdown: timeout — app not fully drained")
+	if err := mng.StopAndDrain(graceCtx); err != nil {
+		log.Printf("drain buffer failed: %v", err)
 	}
+	if err := kWriter.Close(); err != nil {
+		log.Printf("kafka close failed: %v", err)
+	}
+
+	log.Println("shutdown: app drained")
 }

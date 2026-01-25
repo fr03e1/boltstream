@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/fr03e1/boltstream/internal/platform/kafkax"
 	"github.com/fr03e1/boltstream/internal/platform/metrics"
+	"github.com/fr03e1/boltstream/internal/platform/syncx"
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 	"golang.org/x/time/rate"
@@ -18,8 +18,14 @@ import (
 var ErrAlreadyRunning = errors.New("producer: already running")
 var ErrBackpressure = errors.New("backpressure: queue is full")
 
+type KafkaWriter interface {
+	Topic() string
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 type Manager struct {
-	w *kafkax.Writer
+	w KafkaWriter
 
 	running       atomic.Bool
 	runID         atomic.Value // string
@@ -29,25 +35,38 @@ type Manager struct {
 	startedAt     atomic.Value //time.Time
 	writerStarted atomic.Bool
 
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	writerWG sync.WaitGroup
-	genWG    sync.WaitGroup
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	writerWG  sync.WaitGroup
+	genWG     sync.WaitGroup
+	closeOnce sync.Once
+
+	writeFn func(ctx context.Context, batch []kafka.Message) error
 
 	msg chan kafka.Message
 }
 
-func NewManager(w *kafkax.Writer, bufCap int) *Manager {
+func NewManager(w KafkaWriter, bufCap int) *Manager {
 	if bufCap <= 0 {
 		bufCap = 10_000
 	}
-	return &Manager{
+
+	m := &Manager{
 		w:   w,
 		msg: make(chan kafka.Message, bufCap),
 	}
+
+	m.writeFn = func(ctx context.Context, batch []kafka.Message) error {
+		if m.w == nil {
+			return errors.New("writer is nil")
+		}
+		return m.w.WriteMessages(ctx, batch...)
+	}
+
+	return m
 }
 
-func (m *Manager) StartWriter(ctx context.Context) {
+func (m *Manager) StartWriter() {
 	if m.writerStarted.Swap(true) {
 		return
 	}
@@ -58,7 +77,7 @@ func (m *Manager) StartWriter(ctx context.Context) {
 		defer m.writerWG.Done()
 		defer m.writerStarted.Store(false)
 		log.Println("writer.loop.start")
-		m.writer(ctx)
+		m.writer()
 		log.Println("writer.loop.stop")
 	}()
 }
@@ -91,7 +110,7 @@ func (m *Manager) Start(rps int) (string, error) {
 	return runID, nil
 }
 
-func (m *Manager) Stop(wait context.Context) error {
+func (m *Manager) saveStop() func() {
 	m.mu.Lock()
 	if !m.running.Load() {
 		m.mu.Unlock()
@@ -101,6 +120,12 @@ func (m *Manager) Stop(wait context.Context) error {
 	m.cancel = nil
 	m.running.Store(false)
 	m.mu.Unlock()
+
+	return cancel
+}
+
+func (m *Manager) Stop(wait context.Context) error {
+	cancel := m.saveStop()
 
 	if cancel != nil {
 		cancel()
@@ -148,7 +173,7 @@ func (m *Manager) generator(ctx context.Context, rps int) {
 	}
 }
 
-func (m *Manager) writer(ctx context.Context) {
+func (m *Manager) writer() {
 	const flushEvery = 50 * time.Millisecond
 	const maxBatch = 1000
 
@@ -169,7 +194,7 @@ func (m *Manager) writer(ctx context.Context) {
 
 		start := time.Now()
 
-		if err := m.w.W().WriteMessages(ctx, batch...); err != nil {
+		if err := m.writeFn(context.Background(), batch); err != nil {
 			log.Printf("kafka write failed (batch=%d): %v", len(batch), err)
 			metrics.ProduceErrorInc(m.w.Topic())
 		} else {
@@ -188,30 +213,8 @@ func (m *Manager) writer(ctx context.Context) {
 		lastFlush = time.Now()
 	}
 
-	drain := func() {
-		for {
-			select {
-			case msg, ok := <-m.msg:
-				if !ok {
-					flush()
-					return
-				}
-				batch = append(batch, msg)
-				if len(batch) >= maxBatch {
-					flush()
-				}
-			default:
-				flush()
-				return
-			}
-		}
-	}
-
 	for {
 		select {
-		case <-ctx.Done():
-			drain()
-			return
 		case msg, ok := <-m.msg:
 			if !ok {
 				flush()
@@ -247,6 +250,26 @@ func (m *Manager) Enqueue(msg kafka.Message) error {
 	}
 
 	metrics.IngestQueueDepth.Set(float64(len(m.msg)))
+	return nil
+}
+
+func (m *Manager) StopAndDrain(graceCtx context.Context) error {
+	cancel := m.saveStop()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	if err := syncx.Wait(graceCtx, &m.genWG); err != nil {
+		return err
+	}
+
+	m.closeOnce.Do(func() { close(m.msg) })
+
+	if err := syncx.Wait(graceCtx, &m.writerWG); err != nil {
+		return err
+	}
+
 	return nil
 }
 
