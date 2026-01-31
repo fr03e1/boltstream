@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/fr03e1/boltstream/internal/platform/config"
 	"github.com/fr03e1/boltstream/internal/platform/metrics"
 	"github.com/fr03e1/boltstream/internal/platform/syncx"
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 	"golang.org/x/time/rate"
 	"log"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,17 +46,23 @@ type Manager struct {
 	writeFn func(ctx context.Context, batch []kafka.Message) error
 
 	msg chan kafka.Message
+
+	cfg config.Config
+	rng *rand.Rand
 }
 
-func NewManager(w KafkaWriter, bufCap int) *Manager {
-	if bufCap <= 0 {
-		bufCap = 10_000
+func NewManager(w KafkaWriter, cfg config.Config) *Manager {
+	if cfg.ProducerBufferCap <= 0 {
+		cfg.ProducerBufferCap = 10_000
 	}
 
 	m := &Manager{
 		w:   w,
-		msg: make(chan kafka.Message, bufCap),
+		msg: make(chan kafka.Message, cfg.ProducerBufferCap),
+		cfg: cfg,
 	}
+
+	m.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	m.writeFn = func(ctx context.Context, batch []kafka.Message) error {
 		if m.w == nil {
@@ -173,6 +181,48 @@ func (m *Manager) generator(ctx context.Context, rps int) {
 	}
 }
 
+func (m *Manager) retryWrite(batch []kafka.Message) error {
+	retries := m.cfg.ProducerWriteRetries
+	if retries < 0 {
+		retries = 0
+	}
+
+	backoff := time.Duration(m.cfg.ProducerWriteBackoffMin) * time.Millisecond
+	if backoff <= 0 {
+		backoff = 10 * time.Millisecond
+	}
+
+	var lastErr error
+
+	for attempt := 0; attempt <= retries; attempt++ {
+		if err := m.writeFn(context.Background(), batch); err == nil {
+			metrics.RetryTotalAdd(m.w.Topic(), attempt)
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt == retries {
+			break
+		}
+
+		metrics.RetryTotalInc(m.w.Topic())
+
+		half := backoff / 2
+
+		if half <= 0 {
+			half = 1 * time.Millisecond
+		}
+
+		jitter := time.Duration(m.rng.Int63n(int64(half)))
+		sleep := half + jitter
+		time.Sleep(sleep)
+	}
+
+	metrics.RetryDropTotalInc(m.w.Topic())
+	return lastErr
+}
+
 func (m *Manager) writer() {
 	const flushEvery = 50 * time.Millisecond
 	const maxBatch = 1000
@@ -194,7 +244,7 @@ func (m *Manager) writer() {
 
 		start := time.Now()
 
-		if err := m.writeFn(context.Background(), batch); err != nil {
+		if err := m.retryWrite(batch); err != nil {
 			log.Printf("kafka write failed (batch=%d): %v", len(batch), err)
 			metrics.ProduceErrorInc(m.w.Topic())
 		} else {
@@ -218,9 +268,12 @@ func (m *Manager) writer() {
 		case msg, ok := <-m.msg:
 			if !ok {
 				flush()
+				metrics.IngestQueueDepth.Set(float64(0))
 				return
 			}
 			batch = append(batch, msg)
+			metrics.IngestQueueDepth.Set(float64(len(m.msg)))
+
 			if len(batch) >= maxBatch {
 				flush()
 			}

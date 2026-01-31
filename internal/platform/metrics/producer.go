@@ -37,6 +37,22 @@ var (
 		},
 		[]string{"topic"},
 	)
+	produceRetryTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "producer",
+			Name:      "write_retries_total",
+			Help:      "Total number of producer write retries",
+		},
+		[]string{"topic"},
+	)
+	produceDropTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "producer",
+			Name:      "write_drops_total",
+			Help:      "Total number of producer write drops after retries",
+		},
+		[]string{"topic"},
+	)
 )
 
 func RegisterProducer() {
@@ -45,6 +61,8 @@ func RegisterProducer() {
 		produceErrorsTotal,
 		produceBatchSize,
 		produceFlushLatency,
+		produceRetryTotal,
+		produceDropTotal,
 	)
 }
 
@@ -66,4 +84,16 @@ func ObserveBatchSize(topic string, size int) {
 
 func ObserveFlushLatency(topic string, d time.Duration) {
 	produceFlushLatency.WithLabelValues(topic).Observe(d.Seconds())
+}
+
+func RetryTotalAdd(topic string, n int) {
+	produceRetryTotal.WithLabelValues(topic).Add(float64(n))
+}
+
+func RetryTotalInc(topic string) {
+	produceRetryTotal.WithLabelValues(topic).Inc()
+}
+
+func RetryDropTotalInc(topic string) {
+	produceDropTotal.WithLabelValues(topic).Inc()
 }

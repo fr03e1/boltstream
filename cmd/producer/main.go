@@ -34,7 +34,7 @@ func main() {
 
 	st := producer.NewState()
 	g := readiness.New(true)
-	mng := producer.NewManager(kWriter, cfg.ProducerBufferCap)
+	mng := producer.NewManager(kWriter, cfg)
 
 	router := producer.NewRouter(st, g, kWriter, mng)
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
