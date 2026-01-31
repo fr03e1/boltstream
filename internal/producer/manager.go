@@ -196,7 +196,11 @@ func (m *Manager) retryWrite(batch []kafka.Message) error {
 
 	for attempt := 0; attempt <= retries; attempt++ {
 		if err := m.writeFn(context.Background(), batch); err == nil {
-			metrics.RetryTotalAdd(m.w.Topic(), attempt)
+
+			if attempt > 0 {
+				metrics.RetryTotalAdd(m.w.Topic(), attempt)
+			}
+
 			return nil
 		} else {
 			lastErr = err
@@ -205,8 +209,6 @@ func (m *Manager) retryWrite(batch []kafka.Message) error {
 		if attempt == retries {
 			break
 		}
-
-		metrics.RetryTotalInc(m.w.Topic())
 
 		half := backoff / 2
 
@@ -219,6 +221,9 @@ func (m *Manager) retryWrite(batch []kafka.Message) error {
 		time.Sleep(sleep)
 	}
 
+	if retries > 0 {
+		metrics.RetryTotalAdd(m.w.Topic(), retries)
+	}
 	metrics.RetryDropTotalInc(m.w.Topic())
 	return lastErr
 }

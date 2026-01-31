@@ -16,7 +16,6 @@ type Config struct {
 	ProducerBufferCap       int           `env:"PRODUCER_BUFFER_CAP" envDefault:"10000"`
 	ProducerWriteRetries    int           `env:"PRODUCER_WRITE_RETRIES" envDefault:"5"`
 	ProducerWriteBackoffMin int           `env:"PRODUCER_WRITE_BACKOFF_MIN" envDefault:"50"`
-	ProducerWriteBackoffMax int           `env:"PRODUCER_WRITE_BACKOFF_MAX" envDefault:"2"`
 }
 
 func FromEnv() (Config, error) {

@@ -90,10 +90,6 @@ func RetryTotalAdd(topic string, n int) {
 	produceRetryTotal.WithLabelValues(topic).Add(float64(n))
 }
 
-func RetryTotalInc(topic string) {
-	produceRetryTotal.WithLabelValues(topic).Inc()
-}
-
 func RetryDropTotalInc(topic string) {
 	produceDropTotal.WithLabelValues(topic).Inc()
 }
