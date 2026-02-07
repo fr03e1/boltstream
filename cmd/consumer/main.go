@@ -123,47 +123,73 @@ func processMessage(ctx context.Context, msg kafka.Message, reader *kafka.Reader
 	attempts, baseMs int, mode string, start time.Time) error {
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		if err := ValidateAndProcess(msg.Value); err == nil {
+		err := ValidateAndProcess(msg)
+		if err == nil {
 			if err := reader.CommitMessages(ctx, msg); err != nil {
 				metrics.ConsumerErrorAdd("commit", msg.Topic, 1)
-			} else {
-				metrics.ConsumerCommitAdd(msg.Topic, 1)
-				metrics.ConsumerAdd(msg.Topic, 1)
-				metrics.ObserveProcessing(msg.Topic, time.Since(start).Seconds())
-				metrics.ObserveBatchBytes(msg.Topic, len(msg.Value))
+				return err
 			}
+			metrics.ConsumerCommitAdd(msg.Topic, 1)
+			metrics.ConsumerAdd(msg.Topic, 1)
+			metrics.ObserveProcessing(msg.Topic, time.Since(start).Seconds())
+			metrics.ObserveBatchBytes(msg.Topic, len(msg.Value))
 			return nil
 		}
 
-		if attempt == attempts {
-			return sendToDLQ(ctx, msg, reader, dlq, attempt, start)
+		if IsPermanent(err) {
+			metrics.ConsumerErrorAdd("permanent", msg.Topic, 1)
+			return sendToDLQ(ctx, msg, reader, dlq, attempt, start, err, "permanent")
 		}
 
-		var delay time.Duration
-		if mode == "linear" {
-			delay = time.Duration(baseMs*attempt) * time.Millisecond
-		} else {
-			delay = time.Duration(baseMs<<uint(attempt-1)) * time.Millisecond
-			if delay > 2*time.Second {
-				delay = 2 * time.Second
-			}
+		if attempt == attempts {
+			return sendToDLQ(ctx, msg, reader, dlq, attempt, start, err, "transient")
 		}
+
+		delay := calcDelay(mode, baseMs, attempt)
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+
 	return nil
 }
 
-func sendToDLQ(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer, attempt int, start time.Time) error {
+func calcDelay(mode string, baseMs, attempt int) time.Duration {
+	if mode == "linear" {
+		return time.Duration(baseMs*attempt) * time.Millisecond
+	}
+	delay := time.Duration(baseMs<<uint(attempt-1)) * time.Millisecond
+	if delay > 2*time.Second {
+		delay = 2 * time.Second
+	}
+	return delay
+}
+
+func IsPermanent(err error) bool {
+	switch err {
+	case ErrInvalidJSON, ErrMissingEvent, ErrMissingUser, ErrBadTS, ErrBadPayload:
+		return true
+	default:
+		return false
+	}
+}
+
+func sendToDLQ(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer, attempt int, start time.Time, cause error, errorKind string) error {
+	errStr := ""
+	if cause != nil {
+		errStr = cause.Error()
+	}
+
 	headers := []kafka.Header{
 		{Key: "original-topic", Value: []byte(msg.Topic)},
 		{Key: "partition", Value: []byte(strconv.Itoa(msg.Partition))},
 		{Key: "offset", Value: []byte(strconv.FormatInt(msg.Offset, 10))},
 		{Key: "retries", Value: []byte(strconv.Itoa(attempt))},
 		{Key: "ts_deadlettered", Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
+		{Key: "error", Value: []byte(errStr)},
+		{Key: "error_kind", Value: []byte(errorKind)},
 	}
 
 	dlqMsg := kafka.Message{
@@ -191,27 +217,34 @@ func sendToDLQ(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq
 	metrics.ConsumerAdd(msg.Topic, 1)
 	metrics.ObserveProcessing(msg.Topic, time.Since(start).Seconds())
 	metrics.ObserveBatchBytes(msg.Topic, len(msg.Value))
+	metrics.ConsumerDLQAdd(msg.Topic, errorKind, errStr, 1)
+
 	return nil
 }
 
-func ValidateAndProcess(value []byte) error {
+func ValidateAndProcess(msg kafka.Message) error {
 	var m MsgStruct
 
-	if err := json.Unmarshal(value, &m); err != nil {
+	if err := json.Unmarshal(msg.Value, &m); err != nil {
+		metrics.ConsumerErrorAdd("decode", msg.Topic, 1)
 		return ErrInvalidJSON
 	}
 	if _, err := time.Parse(time.RFC3339Nano, m.TS); err != nil {
 		if _, err2 := time.Parse(time.RFC3339, m.TS); err2 != nil {
+			metrics.ConsumerErrorAdd("validate", msg.Topic, 1)
 			return ErrBadTS
 		}
 	}
 	if len(m.Payload) == 0 || string(m.Payload) == "null" || m.Payload[0] != '{' {
+		metrics.ConsumerErrorAdd("validate", msg.Topic, 1)
 		return ErrBadPayload
 	}
 	if m.EventID == "" {
+		metrics.ConsumerErrorAdd("validate", msg.Topic, 1)
 		return ErrMissingEvent
 	}
 	if m.UserID == "" {
+		metrics.ConsumerErrorAdd("validate", msg.Topic, 1)
 		return ErrMissingUser
 	}
 	return nil
@@ -226,7 +259,7 @@ func updateLag(ctx context.Context, r *kafka.Reader, topic string) {
 			return
 		case <-t.C:
 			stats := r.Stats()
-			metrics.ConsumerLagSet(topic, "-1", float64(stats.Lag))
+			metrics.ConsumerLagSet(topic, "all", float64(stats.Lag))
 		}
 	}
 }

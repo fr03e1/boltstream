@@ -5,7 +5,7 @@ import "github.com/prometheus/client_golang/prometheus"
 var (
 	ConsumerReadTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "consumer_read_total",
+			Name: "boltstream_consumer_read_total",
 			Help: "Total messages successfully consumed and committed",
 		},
 		[]string{"topic"},
@@ -13,7 +13,7 @@ var (
 
 	ConsumerCommitTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "consumer_commit_total",
+			Name: "boltstream_consumer_commit_total",
 			Help: "Total successful offset commits",
 		},
 		[]string{"topic"},
@@ -21,7 +21,7 @@ var (
 
 	ConsumerErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "consumer_errors_total",
+			Name: "boltstream_consumer_errors_total",
 			Help: "Total errors by stage (fetch/decode/process/commit/dlq)",
 		},
 		[]string{"stage", "topic"},
@@ -29,7 +29,7 @@ var (
 
 	ConsumerProcessingSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "consumer_processing_seconds",
+			Name:    "boltstream_consumer_processing_seconds",
 			Help:    "Message processing latency",
 			Buckets: prometheus.DefBuckets,
 		},
@@ -38,7 +38,7 @@ var (
 
 	ConsumerBatchBytes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "consumer_batch_bytes",
+			Name:    "boltstream_consumer_batch_bytes",
 			Help:    "Message payload size in bytes",
 			Buckets: []float64{64, 256, 1024, 4096, 16384, 65536, 262144, 1048576},
 		},
@@ -47,7 +47,7 @@ var (
 
 	ConsumerLag = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "consumer_lag",
+			Name: "boltstream_consumer_lag",
 			Help: "Current consumer lag (sum or per partition)",
 		},
 		[]string{"topic", "partition"},
@@ -55,9 +55,17 @@ var (
 
 	ConsumerUp = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "consumer_up",
+			Name: "boltstream_consumer_up",
 			Help: "Is consumer loop running (1) or stopped (0)",
 		},
+	)
+
+	ConsumerDlqTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "boltstream_consumer_dlq_total",
+			Help: "Total DLQ messages sent",
+		},
+		[]string{"topic", "error_kind", "error"},
 	)
 )
 
@@ -70,6 +78,7 @@ func RegisterConsumer() {
 		ConsumerBatchBytes,
 		ConsumerLag,
 		ConsumerUp,
+		ConsumerDlqTotal,
 	)
 }
 
@@ -95,4 +104,8 @@ func ObserveBatchBytes(topic string, size int) {
 
 func ConsumerLagSet(topic, partition string, lag float64) {
 	ConsumerLag.WithLabelValues(topic, partition).Set(lag)
+}
+
+func ConsumerDLQAdd(topic, errorKind, errCode string, n int) {
+	ConsumerDlqTotal.WithLabelValues(topic, errorKind, errCode).Add(float64(n))
 }
