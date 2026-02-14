@@ -33,6 +33,14 @@ var (
 	ErrBadPayload   = fmt.Errorf("bad_payload")
 )
 
+type Committer interface {
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
+type DLQWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -111,7 +119,7 @@ func main() {
 			continue
 		}
 
-		if err := processMessage(ctx, msg, reader, dlqWriter, attempts, baseMs, mode, start); err != nil {
+		if err := ProcessMessage(ctx, msg, reader, dlqWriter, attempts, baseMs, mode, start); err != nil {
 			log.Printf("message.error: %v", err)
 		}
 	}
@@ -119,7 +127,7 @@ func main() {
 	log.Println("shutdown.done")
 }
 
-func processMessage(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer,
+func ProcessMessage(ctx context.Context, msg kafka.Message, reader Committer, dlq DLQWriter,
 	attempts, baseMs int, mode string, start time.Time) error {
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -176,11 +184,8 @@ func IsPermanent(err error) bool {
 	}
 }
 
-func sendToDLQ(ctx context.Context, msg kafka.Message, reader *kafka.Reader, dlq *kafka.Writer, attempt int, start time.Time, cause error, errorKind string) error {
-	errStr := ""
-	if cause != nil {
-		errStr = cause.Error()
-	}
+func sendToDLQ(ctx context.Context, msg kafka.Message, reader Committer, dlq DLQWriter, attempt int, start time.Time, cause error, errorKind string) error {
+	errStr := errorCode(cause)
 
 	headers := []kafka.Header{
 		{Key: "original-topic", Value: []byte(msg.Topic)},
@@ -274,4 +279,21 @@ func splitBrokers(s string) []string {
 		}
 	}
 	return out
+}
+
+func errorCode(err error) string {
+	switch err {
+	case ErrInvalidJSON:
+		return "invalid_json"
+	case ErrMissingEvent:
+		return "missing_event_id"
+	case ErrMissingUser:
+		return "missing_user_id"
+	case ErrBadTS:
+		return "bad_timestamp"
+	case ErrBadPayload:
+		return "bad_payload"
+	default:
+		return "unknown"
+	}
 }
